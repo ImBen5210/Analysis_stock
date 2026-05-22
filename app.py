@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime, timedelta
+from datetime import datetime
 import requests
 import warnings
 
@@ -39,26 +39,29 @@ else:
 
 # --- 核心邏輯函數 ---
 @st.cache_data(ttl=900, show_spinner=False)
-def get_stock_data(symbol, months):
+def get_stock_data(symbol):
     try:
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=months * 30 + 100)
-        
-        # ✨ 強心針 1：建立偽裝 Session，突破 Yahoo 防爬蟲機制
+        # ✨ 強心針 1：建立高度偽裝 Session，突破防爬蟲機制
         session = requests.Session()
         session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8'
         })
         
-        # 下載 K 線資料
-        df = yf.download(symbol, start=start_date, end=end_date, progress=False)
-        if df.empty: return None, None
-        
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(1)
-            
-        # 使用偽裝 Session 抓取基本面 info
+        # ✨ 強心針 2：捨棄易被擋的 yf.download，改用 Ticker 物件直接讀取歷史
         ticker_obj = yf.Ticker(symbol, session=session)
+        
+        # 直接抓取 2 年資料確保長天期均線 (60MA) 計算正確
+        df = ticker_obj.history(period="2y")
+        
+        if df is None or df.empty: 
+            return None, None
+            
+        # 清理時間軸 (移除時區)，避免後續 Plotly 畫圖或 Pandas 計算報錯
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+            
+        # 抓取基本面 info
         try:
             info = ticker_obj.info
         except:
@@ -66,6 +69,7 @@ def get_stock_data(symbol, months):
             
         return df, info
     except Exception as e:
+        print(f"抓取異常: {e}") # 本機除錯用
         return None, None
 
 def calculate_indicators(df):
@@ -105,11 +109,20 @@ def calculate_indicators(df):
 
 # --- 執行查詢 ---
 if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
+    # 防呆：確保使用者沒有忘記加 .TW
+    if "台股" in market_type and not (ticker_input.endswith(".TW") or ticker_input.endswith(".TWO")):
+        st.warning("⚠️ 提醒：台股請記得加上 `.TW` (上市) 或 `.TWO` (上櫃)。例如：2330.TW")
+        st.stop()
+
     with st.spinner(f'正在進行量化分析 {ticker_input} ...'):
-        df, info = get_stock_data(ticker_input, period)
+        df, info = get_stock_data(ticker_input)
         
-        if df is not None and not df.empty:
+        if df is not None and not df.empty and len(df) > 60:
             df = calculate_indicators(df)
+            
+            # 根據使用者選擇的「歷史期間」來裁切要顯示的資料長度
+            display_days = period * 21 # 每月約 21 個交易日
+            df_display = df.tail(display_days)
             
             last_price = float(df['Close'].iloc[-1])
             last_ma20 = float(df['MA20'].iloc[-1])
@@ -124,22 +137,19 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
             bb_upper = float(df['BB_Upper'].iloc[-1])
             bb_lower = float(df['BB_Lower'].iloc[-1])
             
-            past_60d_price = float(df['Close'].iloc[-61]) if len(df) > 60 else float(df['Close'].iloc[0])
+            past_60d_price = float(df['Close'].iloc[-61])
             roc_3m = ((last_price - past_60d_price) / past_60d_price) * 100
             
-            # ✨ 強心針 2：多重本益比 (P/E) 備援計算邏輯
+            # 本益比與基本面防禦計算
             pe_ratio = info.get('trailingPE', None)
             if pe_ratio is None:
                 pe_ratio = info.get('forwardPE', None)
-            # 如果還是空的，且有給每股盈餘(EPS)，我們自己算！
             if pe_ratio is None and info.get('trailingEps', 0) > 0:
                 pe_ratio = last_price / info.get('trailingEps')
 
-            # 基本面資料讀取
             earnings_growth = info.get('earningsGrowth', None)
             peg_ratio = info.get('pegRatio', None)
             
-            # PEG 備援計算：如果沒給 PEG，但有 PE 和 Growth，自己算
             if peg_ratio is None and pe_ratio is not None and earnings_growth is not None and earnings_growth > 0:
                  peg_ratio = pe_ratio / (earnings_growth * 100) 
             
@@ -181,24 +191,23 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
             if peg_ratio is not None:
                 if peg_ratio <= 1:
                     peg_score = 20
-                    details.append(f"✅ **估值優勢 (PEG)**：PEG 為 {peg_ratio:.2f} (小於 1)，利潤成長足以支撐目前本益比，長線極具潛力！得分 20.0/20。")
+                    details.append(f"✅ **估值優勢 (PEG)**：PEG 為 {peg_ratio:.2f} (小於 1)，長線極具潛力！得分 20.0/20。")
                 elif peg_ratio <= 1.5:
                     peg_score = 10
                     details.append(f"🟡 **估值中性 (PEG)**：PEG 為 {peg_ratio:.2f}，估值尚屬合理範圍。得分 10.0/20。")
                 else:
                     peg_score = 0
-                    details.append(f"❌ **估值偏高 (PEG)**：PEG 高達 {peg_ratio:.2f} (大於 1)，股價可能已透支未來成長，需留意高檔修正。得分 0.0/20。")
+                    details.append(f"❌ **估值偏高 (PEG)**：PEG 高達 {peg_ratio:.2f} (大於 1)，股價可能已透支成長。得分 0.0/20。")
             elif pe_ratio is not None:
-                # 只有 PE 沒有 PEG 時的備用邏輯
                 if pe_ratio < 15:
                     peg_score = 15
-                    details.append(f"🟡 **估值評估 (P/E)**：缺乏預估成長率，但本益比 ({pe_ratio:.1f}) 偏低，給予基本分數 15.0/20。")
+                    details.append(f"🟡 **估值評估 (P/E)**：缺乏成長率，但本益比 ({pe_ratio:.1f}) 偏低。得分 15.0/20。")
                 elif pe_ratio > 25:
                     peg_score = 5
-                    details.append(f"⚠️ **估值評估 (P/E)**：缺乏預估成長率，且本益比 ({pe_ratio:.1f}) 偏高，給予偏低分數 5.0/20。")
+                    details.append(f"⚠️ **估值評估 (P/E)**：缺乏成長率，且本益比 ({pe_ratio:.1f}) 偏高。得分 5.0/20。")
                 else:
                     peg_score = 10
-                    details.append(f"🔵 **估值評估 (P/E)**：本益比 ({pe_ratio:.1f}) 落在常態區間，給予中立分數 10.0/20。")
+                    details.append(f"🔵 **估值評估 (P/E)**：本益比 ({pe_ratio:.1f}) 落在常態區間。得分 10.0/20。")
             else:
                 peg_score = 10 
                 details.append("🔵 **估值評估**：系統無法取得預估獲利資料，給予中立分數 10.0/20。")
@@ -207,10 +216,10 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
             bias_25 = (last_price / last_ma25 - 1) * 100
             if last_price > last_ma25 and last_ma25 > last_ma50:
                 trend_score = min(max(10 + bias_25 * 2, 0), 20)
-                details.append(f"✅ **多頭排列**：股價穩站 5 週線之上，且 5 週線大於 10 週線，趨勢得分 {trend_score:.1f}/20。")
+                details.append(f"✅ **多頭排列**：股價穩站 5 週線之上，趨勢得分 {trend_score:.1f}/20。")
             else:
                 trend_score = min(max(5 + bias_25 * 2, 0), 10)
-                details.append(f"🟡 **趨勢震盪**：尚未形成完美多頭或跌破 5 週線，趨勢得分 {trend_score:.1f}/20。")
+                details.append(f"🟡 **趨勢震盪**：尚未形成多頭或跌破 5 週線，趨勢得分 {trend_score:.1f}/20。")
                 
             # 3. 量能分數 (0-20分)
             vol_ratio = last_vol / last_vol20
@@ -260,7 +269,7 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
             
             st.markdown("#### 🏆 綜合雷達總分")
             if total_score >= 80:
-                st.success(f"🔥 綜合得分：{total_score:.1f} 分 - 【強勢且便宜，適合成為 15-20% 的核心持股】")
+                st.success(f"🔥 綜合得分：{total_score:.1f} 分 - 【強勢且便宜，適合成為核心持股】")
             elif total_score >= 60:
                 st.warning(f"⚖️ 綜合得分：{total_score:.1f} 分 - 【中等水準，未破 5 週線前可續抱】")
             else:
@@ -276,24 +285,24 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
             fig = make_subplots(rows=3, cols=1, shared_xaxes=True, 
                                 vertical_spacing=0.03, row_heights=[0.6, 0.2, 0.2])
             
-            fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], 
-                                         low=df['Low'], close=df['Close'], 
+            fig.add_trace(go.Candlestick(x=df_display.index, open=df_display['Open'], high=df_display['High'], 
+                                         low=df_display['Low'], close=df_display['Close'], 
                                          name='K線', increasing_line_color=color_up, decreasing_line_color=color_down), 
                           row=1, col=1)
             
-            fig.add_trace(go.Scatter(x=df.index, y=df['MA25'], name='25MA (5週線警戒)', line=dict(color='orange', width=2)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df.index, y=df['MA50'], name='50MA (10週線底限)', line=dict(color='red', width=2, dash='dot')), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df_display.index, y=df_display['MA25'], name='25MA (5週線警戒)', line=dict(color='orange', width=2)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df_display.index, y=df_display['MA50'], name='50MA (10週線底限)', line=dict(color='red', width=2, dash='dot')), row=1, col=1)
             
-            fig.add_trace(go.Scatter(x=df.index, y=df['Resistance'], name='20日壓力線', line=dict(color='#FF1493', width=1.5, shape='hv', dash='dot')), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df.index, y=df['Support'], name='20日支撐線', line=dict(color='#00BFFF', width=1.5, shape='hv', dash='dot')), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df_display.index, y=df_display['Resistance'], name='20日壓力線', line=dict(color='#FF1493', width=1.5, shape='hv', dash='dot')), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df_display.index, y=df_display['Support'], name='20日支撐線', line=dict(color='#00BFFF', width=1.5, shape='hv', dash='dot')), row=1, col=1)
             
-            vol_colors = [color_up if row['Close'] >= row['Open'] else color_down for i, row in df.iterrows()]
-            fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name='成交量', marker_color=vol_colors), row=2, col=1)
+            vol_colors = [color_up if row['Close'] >= row['Open'] else color_down for i, row in df_display.iterrows()]
+            fig.add_trace(go.Bar(x=df_display.index, y=df_display['Volume'], name='成交量', marker_color=vol_colors), row=2, col=1)
             
-            hist_colors = [color_up if val > 0 else color_down for val in df['MACD_Hist']]
-            fig.add_trace(go.Bar(x=df.index, y=df['MACD_Hist'], name='MACD 柱狀圖', marker_color=hist_colors), row=3, col=1)
-            fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], name='MACD 線', line=dict(color='blue', width=1.5)), row=3, col=1)
-            fig.add_trace(go.Scatter(x=df.index, y=df['Signal'], name='Signal 線', line=dict(color='orange', width=1.5)), row=3, col=1)
+            hist_colors = [color_up if val > 0 else color_down for val in df_display['MACD_Hist']]
+            fig.add_trace(go.Bar(x=df_display.index, y=df_display['MACD_Hist'], name='MACD 柱狀圖', marker_color=hist_colors), row=3, col=1)
+            fig.add_trace(go.Scatter(x=df_display.index, y=df_display['MACD'], name='MACD 線', line=dict(color='blue', width=1.5)), row=3, col=1)
+            fig.add_trace(go.Scatter(x=df_display.index, y=df_display['Signal'], name='Signal 線', line=dict(color='orange', width=1.5)), row=3, col=1)
 
             fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
             
@@ -304,4 +313,4 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
             st.plotly_chart(fig, use_container_width=True)
 
         else:
-            st.error("❌ 找不到該股票數據，請確認代號是否正確（例如台股台積電需輸入 2330.TW）。")
+            st.error("❌ 無法抓取到足夠的資料，請確認代號是否正確。台股請記得加上 `.TW` 或 `.TWO`。")
