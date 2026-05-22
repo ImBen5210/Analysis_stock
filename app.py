@@ -5,7 +5,6 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
-import requests
 import time
 import warnings
 
@@ -39,22 +38,6 @@ st.sidebar.info(
 color_up, color_down = ('#FF3333', '#00AA00') if "台股" in market_type else ('#00AA00', '#FF3333')
 
 
-# ─────────────────────────────────────────────
-# 建立帶有瀏覽器 Header 的 Session，避免 rate limit
-# ─────────────────────────────────────────────
-def make_session():
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-    })
-    return s
-
 
 # ─────────────────────────────────────────────
 # 資料抓取：K 線用 download（穩定），基本面另開 Ticker
@@ -64,9 +47,9 @@ def get_stock_data(symbol, months):
     end_date   = datetime.now()
     start_date = end_date - timedelta(days=months * 30 + 100)
     try:
-        session = make_session()
+        
         df = yf.download(symbol, start=start_date, end=end_date,
-                         progress=False, auto_adjust=True, session=session)
+                         progress=False, auto_adjust=True)
         if df.empty:
             return None, {}
         if isinstance(df.columns, pd.MultiIndex):
@@ -80,19 +63,19 @@ def get_stock_data(symbol, months):
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_fundamentals(symbol):
     """
-    分開抓基本面，加 retry + session，
+    分開抓基本面，加 retry，
     回傳 dict: pe, eps_growth, peg, pe_label, growth_label, peg_source
     """
     result = dict(pe=None, pe_label="", eps_growth=None,
                   growth_label="", peg=None, peg_source="無數據",
                   company_name=symbol)
 
-    session = make_session()
+    
 
     # 最多重試 3 次
     for attempt in range(3):
         try:
-            t = yf.Ticker(symbol, session=session)
+            t = yf.Ticker(symbol)
 
             # ── 公司名稱 ──
             try:
