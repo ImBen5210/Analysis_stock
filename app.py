@@ -5,6 +5,7 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
+import requests
 import warnings
 
 warnings.filterwarnings('ignore')
@@ -21,7 +22,7 @@ market_type = st.sidebar.selectbox("🌍 選擇市場", ["台股 (需加 .TW 或
 ticker_input = st.sidebar.text_input("📝 輸入股票代號", value="2330.TW" if "台股" in market_type else "NVDA").upper()
 period = st.sidebar.slider("📅 查看歷史期間 (月)", 3, 24, 6)
 
-# 🚀 實戰紀律守則 (依據使用者設定)
+# 🚀 實戰紀律守則
 st.sidebar.markdown("---")
 st.sidebar.error("⚔️ **操盤手鐵律：資金與停損控管**")
 st.sidebar.info(
@@ -31,7 +32,6 @@ st.sidebar.info(
     "4. **時間停損**：進場後 3 個月不漲，直接汰弱留強。"
 )
 
-# 動態決定 K 線顏色
 if "台股" in market_type:
     color_up, color_down = '#FF3333', '#00AA00'
 else:
@@ -43,14 +43,22 @@ def get_stock_data(symbol, months):
     try:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=months * 30 + 100)
-        df = yf.download(symbol, start=start_date, end=end_date, progress=False)
         
+        # ✨ 強心針 1：建立偽裝 Session，突破 Yahoo 防爬蟲機制
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36'
+        })
+        
+        # 下載 K 線資料
+        df = yf.download(symbol, start=start_date, end=end_date, progress=False)
         if df.empty: return None, None
         
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(1)
             
-        ticker_obj = yf.Ticker(symbol)
+        # 使用偽裝 Session 抓取基本面 info
+        ticker_obj = yf.Ticker(symbol, session=session)
         try:
             info = ticker_obj.info
         except:
@@ -62,37 +70,31 @@ def get_stock_data(symbol, months):
 
 def calculate_indicators(df):
     df = df.copy()
-    # 均線計算 (包含 5週/25MA 與 10週/50MA 的防禦線)
     df['MA5'] = df['Close'].rolling(window=5).mean()
     df['MA20'] = df['Close'].rolling(window=20).mean()
-    df['MA25'] = df['Close'].rolling(window=25).mean() # 5週線
-    df['MA50'] = df['Close'].rolling(window=50).mean() # 10週線
+    df['MA25'] = df['Close'].rolling(window=25).mean() 
+    df['MA50'] = df['Close'].rolling(window=50).mean() 
     df['MA60'] = df['Close'].rolling(window=60).mean()
     df['Vol20'] = df['Volume'].rolling(window=20).mean()
     
-    # 布林通道
     df['STD20'] = df['Close'].rolling(window=20).std()
     df['BB_Upper'] = df['MA20'] + 2 * df['STD20']
     df['BB_Lower'] = df['MA20'] - 2 * df['STD20']
     
-    # 動態支撐壓力線 (Donchian Channel)
     df['Resistance'] = df['High'].shift(1).rolling(window=20).max()
     df['Support'] = df['Low'].shift(1).rolling(window=20).min()
     
-    # ATR 波動率計算
     df['TR'] = np.maximum(df['High'] - df['Low'], 
                np.maximum(abs(df['High'] - df['Close'].shift(1)), 
                           abs(df['Low'] - df['Close'].shift(1))))
     df['ATR'] = df['TR'].rolling(window=14).mean()
     
-    # RSI (14) 計算
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / (loss + 1e-9) 
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    # MACD 計算
     exp1 = df['Close'].ewm(span=12, adjust=False).mean()
     exp2 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = exp1 - exp2
@@ -109,11 +111,10 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
         if df is not None and not df.empty:
             df = calculate_indicators(df)
             
-            # 取得最新數據
             last_price = float(df['Close'].iloc[-1])
             last_ma20 = float(df['MA20'].iloc[-1])
-            last_ma25 = float(df['MA25'].iloc[-1]) # 5週線
-            last_ma50 = float(df['MA50'].iloc[-1]) # 10週線
+            last_ma25 = float(df['MA25'].iloc[-1])
+            last_ma50 = float(df['MA50'].iloc[-1])
             last_vol = float(df['Volume'].iloc[-1])
             last_vol20 = float(df['Vol20'].iloc[-1])
             last_rsi = float(df['RSI'].iloc[-1])
@@ -123,19 +124,26 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
             bb_upper = float(df['BB_Upper'].iloc[-1])
             bb_lower = float(df['BB_Lower'].iloc[-1])
             
-            # 時間停損計算：過去 60 個交易日 (約 3 個月) 的漲跌幅
             past_60d_price = float(df['Close'].iloc[-61]) if len(df) > 60 else float(df['Close'].iloc[0])
             roc_3m = ((last_price - past_60d_price) / past_60d_price) * 100
             
-            # 基本面數據與 PEG 計算
-            forward_pe = info.get('forwardPE', None)
+            # ✨ 強心針 2：多重本益比 (P/E) 備援計算邏輯
+            pe_ratio = info.get('trailingPE', None)
+            if pe_ratio is None:
+                pe_ratio = info.get('forwardPE', None)
+            # 如果還是空的，且有給每股盈餘(EPS)，我們自己算！
+            if pe_ratio is None and info.get('trailingEps', 0) > 0:
+                pe_ratio = last_price / info.get('trailingEps')
+
+            # 基本面資料讀取
             earnings_growth = info.get('earningsGrowth', None)
             peg_ratio = info.get('pegRatio', None)
             
-            # 如果 Yahoo 沒給 PEG，但有 PE 和 Growth，我們自己算
-            if peg_ratio is None and forward_pe is not None and earnings_growth is not None and earnings_growth > 0:
-                 peg_ratio = forward_pe / (earnings_growth * 100) # 把小數換成百分比數字
+            # PEG 備援計算：如果沒給 PEG，但有 PE 和 Growth，自己算
+            if peg_ratio is None and pe_ratio is not None and earnings_growth is not None and earnings_growth > 0:
+                 peg_ratio = pe_ratio / (earnings_growth * 100) 
             
+            div_yield = info.get('dividendYield', 0) * 100 if info.get('dividendYield') else 0
             company_name = info.get('longName', info.get('shortName', ticker_input))
 
             st.subheader(f"📊 {company_name} ({ticker_input}) 核心數據")
@@ -147,7 +155,6 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
             
             col1.metric("目前收盤價", f"{last_price:.2f}", f"{price_change:.2f} ({pct_change:.2f}%)")
             
-            # 判斷是否破防線，變換顏色
             if last_price < last_ma50:
                 col2.metric("10週線防守 (底限)", f"{last_ma50:.2f}", "⚠️ 已破底限，請出場", delta_color="inverse")
             elif last_price < last_ma25:
@@ -155,11 +162,12 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
             else:
                 col2.metric("5週線防守 (安全)", f"{last_ma25:.2f}", f"距離 {((last_price/last_ma25)-1)*100:.1f}%")
 
-            # 顯示 PEG
             if peg_ratio:
                 col3.metric("PEG (本益成長比)", f"{peg_ratio:.2f}", "便宜 (高成長)" if peg_ratio < 1 else "偏貴 (低成長)", delta_color="inverse" if peg_ratio >= 1 else "normal")
+            elif pe_ratio:
+                col3.metric("本益比 (P/E)", f"{pe_ratio:.2f}", "缺少成長預估數據")
             else:
-                col3.metric("PEG (本益成長比)", "缺乏成長數據")
+                col3.metric("本益比 (P/E)", "資料不足")
                 
             col4.metric("近三個月漲跌幅", f"{roc_3m:.1f}%", "表現遲滯" if roc_3m < 0 else "趨勢向上", delta_color="normal")
 
@@ -169,7 +177,7 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
             
             details = []
             
-            # 1. PEG 估值分數 (0-20分)
+            # 1. 估值分數 (0-20分)
             if peg_ratio is not None:
                 if peg_ratio <= 1:
                     peg_score = 20
@@ -180,11 +188,22 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
                 else:
                     peg_score = 0
                     details.append(f"❌ **估值偏高 (PEG)**：PEG 高達 {peg_ratio:.2f} (大於 1)，股價可能已透支未來成長，需留意高檔修正。得分 0.0/20。")
+            elif pe_ratio is not None:
+                # 只有 PE 沒有 PEG 時的備用邏輯
+                if pe_ratio < 15:
+                    peg_score = 15
+                    details.append(f"🟡 **估值評估 (P/E)**：缺乏預估成長率，但本益比 ({pe_ratio:.1f}) 偏低，給予基本分數 15.0/20。")
+                elif pe_ratio > 25:
+                    peg_score = 5
+                    details.append(f"⚠️ **估值評估 (P/E)**：缺乏預估成長率，且本益比 ({pe_ratio:.1f}) 偏高，給予偏低分數 5.0/20。")
+                else:
+                    peg_score = 10
+                    details.append(f"🔵 **估值評估 (P/E)**：本益比 ({pe_ratio:.1f}) 落在常態區間，給予中立分數 10.0/20。")
             else:
-                peg_score = 10 # 無資料給基本分
-                details.append("🔵 **估值評估 (PEG)**：系統無法取得預期利潤成長數據，給予中立分數 10.0/20。")
+                peg_score = 10 
+                details.append("🔵 **估值評估**：系統無法取得預估獲利資料，給予中立分數 10.0/20。")
 
-            # 2. 趨勢分數 (0-20分) - 結合 5週與10週線
+            # 2. 趨勢分數 (0-20分)
             bias_25 = (last_price / last_ma25 - 1) * 100
             if last_price > last_ma25 and last_ma25 > last_ma50:
                 trend_score = min(max(10 + bias_25 * 2, 0), 20)
@@ -239,7 +258,6 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
             if roc_3m < 0:
                 st.error(f"⏳ **時間停損觸發**：過去 3 個月累計報酬為負 ({roc_3m:.1f}%)，此檔股票已成為死水，建議換股操作！")
             
-            # 顯示評分結果
             st.markdown("#### 🏆 綜合雷達總分")
             if total_score >= 80:
                 st.success(f"🔥 綜合得分：{total_score:.1f} 分 - 【強勢且便宜，適合成為 15-20% 的核心持股】")
@@ -258,25 +276,20 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
             fig = make_subplots(rows=3, cols=1, shared_xaxes=True, 
                                 vertical_spacing=0.03, row_heights=[0.6, 0.2, 0.2])
             
-            # 畫 K 線
             fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], 
                                          low=df['Low'], close=df['Close'], 
                                          name='K線', increasing_line_color=color_up, decreasing_line_color=color_down), 
                           row=1, col=1)
             
-            # 畫均線 (改為你的防守線：25MA 與 50MA)
             fig.add_trace(go.Scatter(x=df.index, y=df['MA25'], name='25MA (5週線警戒)', line=dict(color='orange', width=2)), row=1, col=1)
             fig.add_trace(go.Scatter(x=df.index, y=df['MA50'], name='50MA (10週線底限)', line=dict(color='red', width=2, dash='dot')), row=1, col=1)
             
-            # 畫動態支撐壓力線 (Donchian)
             fig.add_trace(go.Scatter(x=df.index, y=df['Resistance'], name='20日壓力線', line=dict(color='#FF1493', width=1.5, shape='hv', dash='dot')), row=1, col=1)
             fig.add_trace(go.Scatter(x=df.index, y=df['Support'], name='20日支撐線', line=dict(color='#00BFFF', width=1.5, shape='hv', dash='dot')), row=1, col=1)
             
-            # 畫成交量副圖
             vol_colors = [color_up if row['Close'] >= row['Open'] else color_down for i, row in df.iterrows()]
             fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name='成交量', marker_color=vol_colors), row=2, col=1)
             
-            # 畫 MACD 副圖
             hist_colors = [color_up if val > 0 else color_down for val in df['MACD_Hist']]
             fig.add_trace(go.Bar(x=df.index, y=df['MACD_Hist'], name='MACD 柱狀圖', marker_color=hist_colors), row=3, col=1)
             fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], name='MACD 線', line=dict(color='blue', width=1.5)), row=3, col=1)
@@ -292,7 +305,3 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
 
         else:
             st.error("❌ 找不到該股票數據，請確認代號是否正確（例如台股台積電需輸入 2330.TW）。")
-
-# --- 免責聲明 ---
-st.markdown("---")
-st.caption("免責聲明：本工具透過技術與基本面指標自動生成，僅供參考，不構成任何投資建議。市場有風險，投資需謹慎。")
