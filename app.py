@@ -53,11 +53,9 @@ def get_stock_data(symbol, months):
         except:
             info = {}
 
-        # === 價格優先使用最新 K 線收盤價 ===
         last_close = float(df['Close'].iloc[-1])
         current_price = info.get('currentPrice') or info.get('regularMarketPrice') or last_close
 
-        # === 強化估值抓取 ===
         trailing_pe = info.get('trailingPE')
         if not trailing_pe and current_price and info.get('trailingEps'):
             trailing_pe = current_price / info.get('trailingEps')
@@ -124,7 +122,7 @@ def calculate_indicators(df):
 
     return df.dropna()
 
-# --- 主程式 ---
+# --- 執行查詢 ---
 if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
     with st.spinner(f'正在進行量化分析 {ticker_input} ...'):
         df, info, valuation = get_stock_data(ticker_input, period)
@@ -164,7 +162,6 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
             else:
                 col2.metric("5週線防守 (安全)", f"{last_ma25:.2f}", f"距離 {((last_price/last_ma25)-1)*100:.1f}%")
 
-            # PEG 顯示
             if peg_ratio is not None:
                 col3.metric("PEG (本益成長比)", f"{peg_ratio:.2f}", 
                            "便宜 (高成長)" if peg_ratio < 1 else "偏貴 (低成長)", 
@@ -172,7 +169,7 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
             elif trailing_pe is not None:
                 col3.metric("Trailing P/E", f"{trailing_pe:.2f}", "PEG 無成長預估")
             else:
-                col3.metric("PEG (本益成長比)", "缺乏成長數據\n(小型股常見)", delta_color="inverse")
+                col3.metric("PEG (本益成長比)", "缺乏成長數據\n(小型股常見)")
 
             col4.metric("近三個月漲跌幅", f"{roc_3m:.1f}%", "表現遲滯" if roc_3m < 0 else "趨勢向上")
 
@@ -185,34 +182,125 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
            
             details = []
            
+            # PEG 分數
             if peg_ratio is not None:
                 if peg_ratio <= 1:
                     peg_score = 20
-                    details.append(f"✅ **估值優勢 (PEG)**：PEG 為 {peg_ratio:.2f} ... 得分 20.0/20。")
+                    details.append(f"✅ **估值優勢 (PEG)**：PEG 為 {peg_ratio:.2f} (小於 1)，長線極具潛力！得分 20.0/20。")
                 elif peg_ratio <= 1.5:
                     peg_score = 10
-                    details.append(f"🟡 **估值中性 (PEG)**：PEG 為 {peg_ratio:.2f} ... 得分 10.0/20。")
+                    details.append(f"🟡 **估值中性 (PEG)**：PEG 為 {peg_ratio:.2f}，估值尚屬合理。得分 10.0/20。")
                 else:
                     peg_score = 0
-                    details.append(f"❌ **估值偏高 (PEG)**：PEG 高達 {peg_ratio:.2f} ... 得分 0.0/20。")
+                    details.append(f"❌ **估值偏高 (PEG)**：PEG 高達 {peg_ratio:.2f}，需留意修正。得分 0.0/20。")
             else:
                 peg_score = 8
-                pe_text = f"{trailing_pe:.2f}" if trailing_pe else "N/A"
-                details.append(f"🔵 **估值評估**：無法取得成長數據（{ticker_input} 為小型股常見），Trailing P/E ≈ {pe_text}，給予中立分數 8.0/20。")
+                pe_text = f"{trailing_pe:.2f}" if trailing_pe is not None else "N/A"
+                details.append(f"🔵 **估值評估 (PEG)**：無法取得成長數據（{ticker_input} 小型股常見），Trailing P/E ≈ {pe_text}，給予中立分數 8.0/20。")
 
-            # （以下維持你原本的趨勢、量能、MACD、RSI 評分邏輯...）
+            # 趨勢分數
             bias_25 = (last_price / last_ma25 - 1) * 100 if last_ma25 != 0 else 0
             if last_price > last_ma25 and last_ma25 > last_ma50:
                 trend_score = min(max(10 + bias_25 * 2, 0), 20)
-                details.append(f"✅ **多頭排列**：股價穩站 5 週線之上... 得分 {trend_score:.1f}/20。")
+                details.append(f"✅ **多頭排列**：股價穩站 5 週線之上，且 5 週線大於 10 週線，趨勢得分 {trend_score:.1f}/20。")
             else:
                 trend_score = min(max(5 + bias_25 * 2, 0), 10)
-                details.append(f"🟡 **趨勢震盪**：... 得分 {trend_score:.1f}/20。")
-
+                details.append(f"🟡 **趨勢震盪**：尚未形成完美多頭或跌破 5 週線，趨勢得分 {trend_score:.1f}/20。")
+               
+            # 量能分數
             vol_ratio = last_vol / last_vol20 if last_vol20 > 0 else 1
             vol_score = min(max((vol_ratio - 0.5) * 15, 0), 20)
             if vol_ratio > 1.2 and last_price > float(df['Open'].iloc[-1]):
                 vol_score = min(vol_score + 5, 20)
-                details.append(f"✅ **價漲量增**：... 量能得分 {vol_score:.1f}/20。")
+                details.append(f"✅ **價漲量增**：主力資金介入跡象明顯，量能得分 {vol_score:.1f}/20。")
+            elif vol_ratio > 1.2:
+                vol_score = max(vol_score - 10, 0)
+                details.append(f"⚠️ **爆量收黑**：需留意主力出貨風險，量能得分 {vol_score:.1f}/20。")
             else:
-                details.append(f"🔵 **量能平穩**：... 量能得分 {
+                details.append(f"🔵 **量能平穩**：市場觀望氣氛濃厚，量能得分 {vol_score:.1f}/20。")
+
+            # MACD 分數
+            if last_macd > 0 and last_hist > 0:
+                macd_score = 20
+                details.append(f"✅ **動能強勁**：MACD 雙線均在零軸之上且發散，得分 20.0/20。")
+            elif last_hist > 0:
+                macd_score = 10 + min(last_hist / last_price * 1000, 10)
+                details.append(f"🟡 **動能轉強**：MACD 出現紅柱，轉強得分 {macd_score:.1f}/20。")
+            else:
+                macd_score = max(10 - abs(last_hist) / last_price * 1000, 0)
+                details.append(f"❌ **動能疲弱**：MACD 綠柱發散，動能得分 {macd_score:.1f}/20。")
+
+            # RSI 分數
+            if 45 <= last_rsi <= 65:
+                rsi_score = 20
+                details.append(f"✅ **RSI 健康**：RSI={last_rsi:.1f}，無過熱風險，得分 20.0/20。")
+            elif last_rsi > 65:
+                rsi_score = max(20 - (last_rsi - 65) * 1.5, 0)
+                details.append(f"🔴 **高檔過熱**：RSI={last_rsi:.1f}，隨時可能回檔，得分 {rsi_score:.1f}/20。")
+            else:
+                rsi_score = max(20 - (45 - last_rsi) * 1.5, 0)
+                details.append(f"🔵 **低檔超賣**：RSI={last_rsi:.1f}，有技術反彈契機，得分 {rsi_score:.1f}/20。")
+
+            total_score = peg_score + trend_score + vol_score + macd_score + rsi_score
+           
+            # 紀律審查
+            st.markdown("#### ⚔️ 嚴格紀律審查")
+            if last_price < last_ma50:
+                st.error(f"💀 **破底限警告**：已跌破 10 週線 ({last_ma50:.2f})！請執行出場紀律。")
+            elif last_price < last_ma25:
+                st.warning(f"🚨 **跌破 5 週線**：股價落入警戒區 ({last_ma25:.2f})。")
+           
+            if roc_3m < 0:
+                st.error(f"⏳ **時間停損觸發**：過去 3 個月累計報酬為負 ({roc_3m:.1f}%)，建議換股！")
+           
+            # 總分
+            st.markdown("#### 🏆 綜合雷達總分")
+            if total_score >= 80:
+                st.success(f"🔥 綜合得分：{total_score:.1f} 分 - 【強勢且便宜，適合成為 15-20% 的核心持股】")
+            elif total_score >= 60:
+                st.warning(f"⚖️ 綜合得分：{total_score:.1f} 分 - 【中等水準，未破 5 週線前可續抱】")
+            else:
+                st.error(f"⚠️ 綜合得分：{total_score:.1f} 分 - 【體質轉弱，建議優先考慮汰除】")
+
+            for detail in details:
+                st.write(detail)
+
+            # --- 圖表 ---
+            st.markdown("---")
+            st.subheader("📈 實戰特仕版技術分析圖表 (內建 5週/10週線與支撐壓力)")
+           
+            fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
+                                vertical_spacing=0.03, row_heights=[0.6, 0.2, 0.2])
+           
+            fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'],
+                                         low=df['Low'], close=df['Close'],
+                                         name='K線', increasing_line_color=color_up, decreasing_line_color=color_down),
+                          row=1, col=1)
+           
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA25'], name='25MA (5週線警戒)', line=dict(color='orange', width=2)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA50'], name='50MA (10週線底限)', line=dict(color='red', width=2, dash='dot')), row=1, col=1)
+           
+            fig.add_trace(go.Scatter(x=df.index, y=df['Resistance'], name='20日壓力線', line=dict(color='#FF1493', width=1.5, shape='hv', dash='dot')), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['Support'], name='20日支撐線', line=dict(color='#00BFFF', width=1.5, shape='hv', dash='dot')), row=1, col=1)
+           
+            vol_colors = [color_up if row['Close'] >= row['Open'] else color_down for i, row in df.iterrows()]
+            fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name='成交量', marker_color=vol_colors), row=2, col=1)
+           
+            hist_colors = [color_up if val > 0 else color_down for val in df['MACD_Hist']]
+            fig.add_trace(go.Bar(x=df.index, y=df['MACD_Hist'], name='MACD 柱狀圖', marker_color=hist_colors), row=3, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], name='MACD 線', line=dict(color='blue', width=1.5)), row=3, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['Signal'], name='Signal 線', line=dict(color='orange', width=1.5)), row=3, col=1)
+
+            fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
+            fig.update_layout(height=800, template="plotly_white",
+                              hovermode="x unified", xaxis_rangeslider_visible=False,
+                              margin=dict(l=0, r=0, t=30, b=0))
+                             
+            st.plotly_chart(fig, use_container_width=True)
+
+        else:
+            st.error("❌ 找不到該股票數據，請確認代號是否正確。")
+
+# --- 免責聲明 ---
+st.markdown("---")
+st.caption("免責聲明：本工具僅供參考，不構成任何投資建議。市場有風險，投資需謹慎。")
