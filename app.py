@@ -4,9 +4,10 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime
+from datetime import datetime, timedelta
 import requests
 import warnings
+import time
 
 warnings.filterwarnings('ignore')
 
@@ -19,7 +20,7 @@ st.markdown("結合**動態 AI 評分、ATR 停損、MACD 動能、布林通道�
 # --- 側邊欄：輸入參數與實戰紀律 ---
 st.sidebar.header("🔍 查詢設定")
 market_type = st.sidebar.selectbox("🌍 選擇市場", ["台股 (需加 .TW 或 .TWO)", "美股"])
-ticker_input = st.sidebar.text_input("📝 輸入股票代號", value="2330.TW" if "台股" in market_type else "NVDA").upper()
+ticker_input = st.sidebar.text_input("📝 輸入股票代號", value="2330.TW" if "台股" in market_type else "NVDA").upper().strip()
 period = st.sidebar.slider("📅 查看歷史期間 (月)", 3, 24, 6)
 
 # 🚀 實戰紀律守則
@@ -38,39 +39,54 @@ else:
     color_up, color_down = '#00AA00', '#FF3333'
 
 # --- 核心邏輯函數 ---
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def get_stock_data(symbol):
+    df = None
+    info = {}
+    
+    # 策略 1：使用偽裝 Session 下載歷史資料
     try:
-        # ✨ 強心針 1：建立高度偽裝 Session，突破防爬蟲機制
         session = requests.Session()
         session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8'
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         })
         
-        # ✨ 強心針 2：捨棄易被擋的 yf.download，改用 Ticker 物件直接讀取歷史
+        # 先嘗試用 history
         ticker_obj = yf.Ticker(symbol, session=session)
-        
-        # 直接抓取 2 年資料確保長天期均線 (60MA) 計算正確
         df = ticker_obj.history(period="2y")
         
-        if df is None or df.empty: 
-            return None, None
+        # 策略 2：如果 history 失敗，退回使用 download 並強制轉型
+        if df is None or df.empty:
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=730)
+            df = yf.download(symbol, start=start_date, end=end_date, progress=False, session=session)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.droplevel(1)
+                
+        # 確保資料格式正確，並強制移除時區
+        if df is not None and not df.empty:
+            if df.index.tz is not None:
+                df.index = df.index.tz_localize(None)
             
-        # 清理時間軸 (移除時區)，避免後續 Plotly 畫圖或 Pandas 計算報錯
-        if df.index.tz is not None:
-            df.index = df.index.tz_localize(None)
-            
-        # 抓取基本面 info
-        try:
-            info = ticker_obj.info
-        except:
-            info = {}
-            
-        return df, info
+            # 強制將所有數值欄位轉換為 float
+            for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+            df = df.dropna(subset=['Close'])
+
+        # 策略 3：分開抓取 Info，並加入延遲重試避免被擋
+        for attempt in range(2):
+            try:
+                info = ticker_obj.info
+                if info: break
+            except:
+                time.sleep(1) # 被擋時休息 1 秒再試
+                
     except Exception as e:
-        print(f"抓取異常: {e}") # 本機除錯用
-        return None, None
+        print(f"Fetch Error: {e}")
+        pass
+        
+    return df, info
 
 def calculate_indicators(df):
     df = df.copy()
@@ -109,21 +125,26 @@ def calculate_indicators(df):
 
 # --- 執行查詢 ---
 if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
-    # 防呆：確保使用者沒有忘記加 .TW
+    # 嚴格防呆：過濾空白或錯誤格式
+    if not ticker_input:
+        st.warning("請輸入股票代號！")
+        st.stop()
+        
     if "台股" in market_type and not (ticker_input.endswith(".TW") or ticker_input.endswith(".TWO")):
-        st.warning("⚠️ 提醒：台股請記得加上 `.TW` (上市) 或 `.TWO` (上櫃)。例如：2330.TW")
+        st.warning(f"⚠️ 找不到 `{ticker_input}`。台股請記得加上 `.TW` (上市) 或 `.TWO` (上櫃)。例如：2330.TW")
         st.stop()
 
-    with st.spinner(f'正在進行量化分析 {ticker_input} ...'):
+    with st.spinner(f'正在強行突破連線分析 {ticker_input} ...'):
         df, info = get_stock_data(ticker_input)
         
+        # 確保有抓到足夠的資料可以算季線
         if df is not None and not df.empty and len(df) > 60:
             df = calculate_indicators(df)
             
-            # 根據使用者選擇的「歷史期間」來裁切要顯示的資料長度
-            display_days = period * 21 # 每月約 21 個交易日
+            display_days = period * 21 
             df_display = df.tail(display_days)
             
+            # 確保最後一筆資料是乾淨的數字
             last_price = float(df['Close'].iloc[-1])
             last_ma20 = float(df['MA20'].iloc[-1])
             last_ma25 = float(df['MA25'].iloc[-1])
@@ -140,12 +161,17 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
             past_60d_price = float(df['Close'].iloc[-61])
             roc_3m = ((last_price - past_60d_price) / past_60d_price) * 100
             
-            # 本益比與基本面防禦計算
+            # 本益比與基本面防禦計算 (暴力解)
             pe_ratio = info.get('trailingPE', None)
             if pe_ratio is None:
                 pe_ratio = info.get('forwardPE', None)
-            if pe_ratio is None and info.get('trailingEps', 0) > 0:
-                pe_ratio = last_price / info.get('trailingEps')
+            
+            # 如果 Yahoo 還是不給，自己算 (如果抓得到 EPS 的話)
+            try:
+                eps = info.get('trailingEps', 0)
+                if pe_ratio is None and eps and eps > 0:
+                    pe_ratio = last_price / eps
+            except: pass
 
             earnings_growth = info.get('earningsGrowth', None)
             peg_ratio = info.get('pegRatio', None)
@@ -153,7 +179,12 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
             if peg_ratio is None and pe_ratio is not None and earnings_growth is not None and earnings_growth > 0:
                  peg_ratio = pe_ratio / (earnings_growth * 100) 
             
-            div_yield = info.get('dividendYield', 0) * 100 if info.get('dividendYield') else 0
+            div_yield = info.get('dividendYield', 0)
+            if div_yield is not None:
+                div_yield = div_yield * 100
+            else:
+                div_yield = 0
+                
             company_name = info.get('longName', info.get('shortName', ticker_input))
 
             st.subheader(f"📊 {company_name} ({ticker_input}) 核心數據")
@@ -168,7 +199,7 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
             if last_price < last_ma50:
                 col2.metric("10週線防守 (底限)", f"{last_ma50:.2f}", "⚠️ 已破底限，請出場", delta_color="inverse")
             elif last_price < last_ma25:
-                col2.metric("5週線防守 (警戒)", f"{last_ma25:.2f}", "🚨 跌破5週線警戒", delta_color="inverse")
+                col2.metric("5週線防守 (警戒)", f"{last_ma25:.2f}", "🚨 跌破警戒", delta_color="inverse")
             else:
                 col2.metric("5週線防守 (安全)", f"{last_ma25:.2f}", f"距離 {((last_price/last_ma25)-1)*100:.1f}%")
 
@@ -280,7 +311,7 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
 
             # --- 第三排：專業股價 K 線與副圖 ---
             st.markdown("---")
-            st.subheader("📈 實戰特仕版技術分析圖表 (內建 5週/10週線與支撐壓力)")
+            st.subheader("📈 實戰特仕版技術分析圖表")
             
             fig = make_subplots(rows=3, cols=1, shared_xaxes=True, 
                                 vertical_spacing=0.03, row_heights=[0.6, 0.2, 0.2])
@@ -313,4 +344,6 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
             st.plotly_chart(fig, use_container_width=True)
 
         else:
-            st.error("❌ 無法抓取到足夠的資料，請確認代號是否正確。台股請記得加上 `.TW` 或 `.TWO`。")
+            # 加入更詳細的錯誤回饋，幫我們判斷是哪一關出錯
+            st.error(f"❌ 無法抓取 `{ticker_input}` 的資料。請確認代號是否輸入正確！")
+            st.info("提示：台股請務必輸入 `.TW` 或 `.TWO`，且該檔股票上市必須超過三個月以上。")
