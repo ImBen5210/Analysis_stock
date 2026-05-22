@@ -35,7 +35,7 @@ else:
     color_up, color_down = '#00AA00', '#FF3333'
 
 # --- 核心函數 ---
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)   # 縮短快取時間，讓即時價格更即時
 def get_stock_data(symbol, months):
     try:
         end_date = datetime.now()
@@ -53,16 +53,20 @@ def get_stock_data(symbol, months):
         except:
             info = {}
 
+        # === 優先使用 current_price（即時價格）===
+        current_price = info.get('currentPrice') or info.get('regularMarketPrice')
         last_close = float(df['Close'].iloc[-1])
-        current_price = info.get('currentPrice') or info.get('regularMarketPrice') or last_close
+        
+        # 如果 current_price 抓不到，才用最後收盤價
+        display_price = current_price if current_price else last_close
 
         trailing_pe = info.get('trailingPE')
-        if not trailing_pe and current_price and info.get('trailingEps'):
-            trailing_pe = current_price / info.get('trailingEps')
+        if not trailing_pe and display_price and info.get('trailingEps'):
+            trailing_pe = display_price / info.get('trailingEps')
 
         forward_pe = info.get('forwardPE')
-        if not forward_pe and current_price and info.get('forwardEps'):
-            forward_pe = current_price / info.get('forwardEps')
+        if not forward_pe and display_price and info.get('forwardEps'):
+            forward_pe = display_price / info.get('forwardEps')
 
         earnings_growth = info.get('earningsGrowth') or info.get('earningsQuarterlyGrowth') or info.get('revenueGrowth')
 
@@ -77,7 +81,8 @@ def get_stock_data(symbol, months):
             'forward_pe': forward_pe,
             'peg_ratio': peg_ratio,
             'earnings_growth': earnings_growth,
-            'current_price': current_price
+            'current_price': current_price,
+            'last_close': last_close
         }
 
         return df, info, valuation
@@ -130,7 +135,8 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
         if df is not None and not df.empty:
             df = calculate_indicators(df)
            
-            last_price = float(df['Close'].iloc[-1])
+            # 使用 current_price（符合你的需求）
+            last_price = valuation.get('current_price') or float(df['Close'].iloc[-1])
             last_ma25 = float(df['MA25'].iloc[-1])
             last_ma50 = float(df['MA50'].iloc[-1])
             last_vol = float(df['Volume'].iloc[-1])
@@ -176,13 +182,12 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
             with st.expander("🔍 Yahoo 原始估值數據（除錯）"):
                 st.json(valuation)
 
-            # --- AI 動態評分 ---
+            # --- AI 動態評分與實戰紀律 ---
             st.markdown("---")
             st.subheader("🤖 AI 動態評分與實戰紀律")
            
             details = []
            
-            # PEG 分數
             if peg_ratio is not None:
                 if peg_ratio <= 1:
                     peg_score = 20
@@ -198,7 +203,7 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
                 pe_text = f"{trailing_pe:.2f}" if trailing_pe is not None else "N/A"
                 details.append(f"🔵 **估值評估 (PEG)**：無法取得成長數據（{ticker_input} 小型股常見），Trailing P/E ≈ {pe_text}，給予中立分數 8.0/20。")
 
-            # 趨勢分數
+            # 趨勢、量能、MACD、RSI（維持原本邏輯）
             bias_25 = (last_price / last_ma25 - 1) * 100 if last_ma25 != 0 else 0
             if last_price > last_ma25 and last_ma25 > last_ma50:
                 trend_score = min(max(10 + bias_25 * 2, 0), 20)
@@ -207,7 +212,6 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
                 trend_score = min(max(5 + bias_25 * 2, 0), 10)
                 details.append(f"🟡 **趨勢震盪**：尚未形成完美多頭或跌破 5 週線，趨勢得分 {trend_score:.1f}/20。")
                
-            # 量能分數
             vol_ratio = last_vol / last_vol20 if last_vol20 > 0 else 1
             vol_score = min(max((vol_ratio - 0.5) * 15, 0), 20)
             if vol_ratio > 1.2 and last_price > float(df['Open'].iloc[-1]):
@@ -219,7 +223,6 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
             else:
                 details.append(f"🔵 **量能平穩**：市場觀望氣氛濃厚，量能得分 {vol_score:.1f}/20。")
 
-            # MACD 分數
             if last_macd > 0 and last_hist > 0:
                 macd_score = 20
                 details.append(f"✅ **動能強勁**：MACD 雙線均在零軸之上且發散，得分 20.0/20。")
@@ -230,7 +233,6 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
                 macd_score = max(10 - abs(last_hist) / last_price * 1000, 0)
                 details.append(f"❌ **動能疲弱**：MACD 綠柱發散，動能得分 {macd_score:.1f}/20。")
 
-            # RSI 分數
             if 45 <= last_rsi <= 65:
                 rsi_score = 20
                 details.append(f"✅ **RSI 健康**：RSI={last_rsi:.1f}，無過熱風險，得分 20.0/20。")
@@ -243,7 +245,6 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
 
             total_score = peg_score + trend_score + vol_score + macd_score + rsi_score
            
-            # 紀律審查
             st.markdown("#### ⚔️ 嚴格紀律審查")
             if last_price < last_ma50:
                 st.error(f"💀 **破底限警告**：已跌破 10 週線 ({last_ma50:.2f})！請執行出場紀律。")
@@ -253,7 +254,6 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
             if roc_3m < 0:
                 st.error(f"⏳ **時間停損觸發**：過去 3 個月累計報酬為負 ({roc_3m:.1f}%)，建議換股！")
            
-            # 總分
             st.markdown("#### 🏆 綜合雷達總分")
             if total_score >= 80:
                 st.success(f"🔥 綜合得分：{total_score:.1f} 分 - 【強勢且便宜，適合成為 15-20% 的核心持股】")
@@ -269,8 +269,7 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
             st.markdown("---")
             st.subheader("📈 實戰特仕版技術分析圖表 (內建 5週/10週線與支撐壓力)")
            
-            fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
-                                vertical_spacing=0.03, row_heights=[0.6, 0.2, 0.2])
+            fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.6, 0.2, 0.2])
            
             fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'],
                                          low=df['Low'], close=df['Close'],
@@ -292,15 +291,11 @@ if st.sidebar.button("啟動健診分析 🎯", type="primary") or ticker_input:
             fig.add_trace(go.Scatter(x=df.index, y=df['Signal'], name='Signal 線', line=dict(color='orange', width=1.5)), row=3, col=1)
 
             fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
-            fig.update_layout(height=800, template="plotly_white",
-                              hovermode="x unified", xaxis_rangeslider_visible=False,
-                              margin=dict(l=0, r=0, t=30, b=0))
-                             
+            fig.update_layout(height=800, template="plotly_white", hovermode="x unified", xaxis_rangeslider_visible=False)
             st.plotly_chart(fig, use_container_width=True)
 
         else:
             st.error("❌ 找不到該股票數據，請確認代號是否正確。")
 
-# --- 免責聲明 ---
 st.markdown("---")
 st.caption("免責聲明：本工具僅供參考，不構成任何投資建議。市場有風險，投資需謹慎。")
